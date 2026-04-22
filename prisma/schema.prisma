@@ -17,7 +17,7 @@ model Alert {
   lido      Boolean  @default(false)
   createdAt DateTime @default(now())
 
-  @@unique([os, tipo, email])
+  @@unique([os, tipo])
 }
 
 model FollowUp {
