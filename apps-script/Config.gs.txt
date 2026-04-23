@@ -1,0 +1,17 @@
+const CONFIG = {
+  ABA_PRINCIPAL: "Gerenciamento IH",
+  ABA_PECAS: "Solicitação de Peças",
+  ABA_AGENDAMENTO: "Clientes a agendar",
+
+  EMAIL_DESTINO: "contato.vinicius.pessoa@gmail.com",
+
+  COLUNAS: {
+    OS: 2,
+    CLIENTE: 3,
+    TAT: 6,
+    PECA_NECESSARIA: 7,
+    AGENDADO: 8,
+    PECA_RETORNO: 11,
+    RETORNO_AGENDADO: 12
+  }
+};

@@ -1,0 +1,283 @@
+// =======================
+// EVENTO PRINCIPAL
+// =======================
+function onEditHandler(e) {
+   if (!e) return;
+
+  const sheet = e.source.getActiveSheet();
+  if (sheet.getName() !== CONFIG.ABA_PRINCIPAL) return;
+
+  const row = e.range.getRow();
+  const col = e.range.getColumn();
+  const value = (e.value || "").toLowerCase();
+
+  const os = sheet.getRange(row, CONFIG.COLUNAS.OS).getValue();
+  const cliente = sheet.getRange(row, CONFIG.COLUNAS.CLIENTE).getValue();
+
+  if (!os) return;
+
+  if (col === CONFIG.COLUNAS.PECA_NECESSARIA) {
+    processarPeca("NORMAL", value, os, cliente);
+  }
+
+  if (col === CONFIG.COLUNAS.PECA_RETORNO) {
+    processarPeca("RETORNO", value, os, cliente);
+  }
+}
+
+// =======================
+// REGRAS
+// =======================
+function normalizarTexto(texto) {
+  return (texto || "")
+    .toLowerCase()
+    .normalize("NFD")                // separa acentos
+    .replace(/[\u0300-\u036f]/g, "") // remove acentos
+    .trim();
+}
+
+function processarPeca(tipo, value, os, cliente) {
+  const value = normalizarTexto(value);
+
+  const isNaoSolicitada = value.includes("nao") && value.includes("solicitada");
+  const isEmEstoque = value.includes("estoque");
+
+  log("DEBUG_TIPO", { value, isNaoSolicitada, isEmEstoque });
+
+  if (isNaoSolicitada) {
+    tratarNaoSolicitada(os, cliente, tipo);
+    return;
+  }
+
+  if (isEmEstoque) {
+    tratarEmEstoque(os, cliente, tipo);
+    return;
+  }
+
+  log("IGNORADO", value);
+}
+
+// =======================
+// NÃO SOLICITADA
+// =======================
+function tratarNaoSolicitada(os, cliente, tipo) {
+  alertar("Peça NÃO solicitada", os, cliente);
+
+  preencherOsNaColunaB(CONFIG.ABA_PECAS, os);
+
+  enviarParaBackend(os, cliente, "PECAS_PENDENTE", tipo);
+}
+
+// =======================
+// EM ESTOQUE (COM SLA)
+// =======================
+  function tratarEmEstoque(os, cliente, tipo) {
+    alertar("Peça em estoque", os, cliente);
+
+    upsertLinha(CONFIG.ABA_AGENDAMENTO, os, cliente, "Não");
+
+    salvarPrazo(os, tipo);
+
+    enviarParaBackend(os, cliente, "AGUARDANDO_AGENDAMENTO", tipo);
+  }
+
+// =======================
+// PRAZO (SALVAR)
+// =======================
+function salvarPrazo(os, tipo) {
+  const key = `prazo_${tipo}_${os}`;
+  const props = PropertiesService.getScriptProperties();
+
+  if (props.getProperty(key)) return; // evita duplicação
+
+  props.setProperty(key, JSON.stringify({
+    data: new Date().toISOString(),
+    tipo,
+    alertado: false
+  }));
+}
+
+// =======================
+// PRAZO (VERIFICAR)
+// =======================
+function verificarPrazos() {
+  const props = PropertiesService.getScriptProperties().getProperties();
+  const hoje = new Date();
+
+  for (let key in props) {
+    if (!key.startsWith("prazo_")) continue;
+
+    try {
+      const obj = JSON.parse(props[key]);
+
+      if (!obj.data || !obj.tipo) continue;
+
+      const data = new Date(obj.data);
+      const diff = (hoje - data) / (1000 * 60 * 60 * 24);
+
+      if (diff >= 5 && !obj.alertado) {
+        const [, tipo, os] = key.split("_");
+
+        alertar("⚠️ PRAZO ESTOURADO", os, "Verificar agendamento");
+
+        enviarParaBackend(os, "", "PRAZO_ESTOURADO", tipo);
+
+        obj.alertado = true;
+
+        PropertiesService.getScriptProperties()
+          .setProperty(key, JSON.stringify(obj));
+      }
+
+    } catch (err) {
+      log("ERROR", err.message);
+    }
+  }
+}
+
+// =======================
+// UPSERT
+// =======================
+function upsertLinha(aba, os, cliente, status) {
+  const sheet = SpreadsheetApp
+    .getActiveSpreadsheet()
+    .getSheetByName(aba);
+
+  const data = sheet.getDataRange().getValues();
+
+  for (let i = 1; i < data.length; i++) {
+    if (String(data[i][0]) === String(os)) { // verificar depois questão de String(os)
+      sheet.getRange(i + 1, 2).setValue(status);
+      log("UPDATE", os);
+      return;
+    }
+  }
+
+  const lastRow = sheet.getLastRow() + 1;
+
+  sheet.getRange(lastRow, 1).setValue(os);
+  sheet.getRange(lastRow, 2).setValue(cliente);
+  sheet.getRange(lastRow, 3).setValue(status);
+
+  log("INSERT", os);
+}
+
+function preencherOsNaColunaB(aba, os) {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(aba);
+  if (!sheet) return Logger.log("ABA NÃO ENCONTRADA");
+
+  const data = sheet.getDataRange().getDisplayValues();
+  const headers = data[0];
+
+  const colPecaSolicitada = headers.indexOf("Peça Solicitada?");
+
+  for (let i = 1; i < data.length; i++) {
+    const colunaB = (data[i][1] || "").toString().trim();
+
+    // primeira linha vazia da coluna OS
+    if (colunaB === "") {
+
+      // 1. preenche OS
+      sheet.getRange(i + 1, 2).setValue(os);
+
+      // 2. já marca peça como "Não"
+      if (colPecaSolicitada !== -1) {
+        sheet.getRange(i + 1, colPecaSolicitada + 1).setValue("Não");
+      }
+
+      log("OS_PREENCHIDA_E_PECA_NAO", os);
+      return;
+    }
+  }
+
+  log("SEM_LINHA_DISPONIVEL", os);
+}
+
+// =======================
+// ALERTA
+// =======================
+function alertar(titulo, os, cliente) {
+  const msg = `${titulo}\nOS: ${os}\nCliente: ${cliente}`;
+
+  try {
+    SpreadsheetApp.getUi().alert(msg);
+  } catch (err) {
+    MailApp.sendEmail(CONFIG.EMAIL_DESTINO, titulo, msg);
+  }
+}
+
+// =======================
+// BACKEND
+// =======================
+function enviarParaBackend(os, cliente, mensagem, tipo) {
+  const API_KEY = getEnv("API_KEY");
+  const BASE_URL = getEnv("BASE_URL").replace(/\/$/, "");
+
+  const payload = {
+    os: String(os),
+    cliente: String(cliente),
+    tipo,
+    mensagem,
+    origem: "google_sheets"
+  };
+
+  const options = {
+    method: "post",
+    contentType: "application/json",
+    headers: {
+      "api-key": API_KEY
+    },
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true
+  };
+
+  try {
+    const res = UrlFetchApp.fetch(
+      `${BASE_URL}/events`,
+      options
+    );
+
+    log("BACKEND", {
+      status: res.getResponseCode(),
+      body: res.getContentText()
+    });
+
+  } catch (err) {
+    log("BACKEND_ERROR", err.message);
+  }
+}
+
+// =======================
+// RELATÓRIO SEMANAL
+// =======================
+function enviarRelatorioSemanal() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet()
+    .getSheetByName(CONFIG.ABA_PRINCIPAL);
+
+  const data = sheet.getDataRange().getValues();
+
+  const linhas = data
+    .slice(1)
+    .filter(row => row[CONFIG.COLUNAS.TAT - 1] > 30)
+    .map(row =>
+      `OS: ${row[CONFIG.COLUNAS.OS - 1]} | ${row[CONFIG.COLUNAS.CLIENTE - 1]} | TAT: ${row[CONFIG.COLUNAS.TAT - 1]}`
+    );
+
+  if (!linhas.length) return;
+
+  MailApp.sendEmail(
+    CONFIG.EMAIL_DESTINO,
+    "Relatório semanal - TAT > 30",
+    linhas.join("\n")
+  );
+}
+
+// =======================
+// LOGGER
+// =======================
+function log(type, message) {
+  console.log(JSON.stringify({
+    type,
+    message,
+    timestamp: new Date().toISOString()
+  }));
+}
